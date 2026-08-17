@@ -13,12 +13,17 @@
 type Raf = (cb: FrameRequestCallback) => number;
 type Caf = (handle: number) => void;
 
+const defaultRaf: Raf = (cb) =>
+    typeof window !== 'undefined' ? window.requestAnimationFrame(cb) : requestAnimationFrame(cb);
+const defaultCaf: Caf = (handle) =>
+    typeof window !== 'undefined' ? window.cancelAnimationFrame(handle) : cancelAnimationFrame(handle);
+
 export class AnimationFrameGuard {
     private id: number | null = null;
 
     constructor(
-        private readonly raf: Raf = requestAnimationFrame,
-        private readonly caf: Caf = cancelAnimationFrame,
+        private readonly raf: Raf = defaultRaf,
+        private readonly caf: Caf = defaultCaf,
     ) {}
 
     public isPending(): boolean {
