@@ -153,17 +153,27 @@ export class WebCodecsPlayer extends BaseCanvasBasedPlayer {
                 this.receivedFirstFrame = true;
             }
 
-            // SPS/PPS (and VPS for H.265) were handed to the decoder via the
-            // `description` field of VideoDecoderConfig at configure() time, and
-            // AV1 carries its sequence header inline — so decode the keyframe
-            // data directly with no per-frame config concatenation (finding #41).
-            this.decoder.decode(
-                new EncodedVideoChunk({
-                    type: 'key',
-                    timestamp: Number(pts),
-                    data,
-                }),
-            );
+            if (this.detectedCodec === 'av1') {
+                this.decoder.decode(
+                    new EncodedVideoChunk({
+                        type: 'key',
+                        timestamp: Number(pts),
+                        data,
+                    }),
+                );
+            } else {
+                // Annex B (H.264 / H.265): prepend SPS/PPS/VPS parameter sets to keyframe chunk
+                const fullData = new Uint8Array(this.configData.length + data.length);
+                fullData.set(this.configData);
+                fullData.set(data, this.configData.length);
+                this.decoder.decode(
+                    new EncodedVideoChunk({
+                        type: 'key',
+                        timestamp: Number(pts),
+                        data: fullData,
+                    }),
+                );
+            }
             return;
         }
 

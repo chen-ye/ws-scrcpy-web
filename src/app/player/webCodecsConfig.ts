@@ -24,10 +24,5 @@ export function buildDecoderConfig(params: BuildDecoderConfigParams): VideoDecod
         codedHeight: params.codedHeight,
         optimizeForLatency: true,
     };
-    // H.264/H.265: hand the parameter sets to the decoder once via `description`.
-    // Copy so the decoder's view can't be mutated by later reuse of the source buffer.
-    if (params.detectedCodec === 'h264' || params.detectedCodec === 'h265') {
-        config.description = new Uint8Array(params.configData);
-    }
     return config;
 }
