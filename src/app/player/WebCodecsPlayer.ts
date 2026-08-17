@@ -263,6 +263,10 @@ export class WebCodecsPlayer extends BaseCanvasBasedPlayer {
         this.emit('input-video-resize', screenInfo);
         this.setScreenInfo(screenInfo);
         this.initCanvas(width, height);
+        const ctx = this.tag.getContext('2d');
+        if (ctx) {
+            this.context = ctx;
+        }
         if (scale !== 1) {
             this.tag.style.transform = `scale(${scale.toFixed(4)})`;
         } else {
@@ -281,14 +285,12 @@ export class WebCodecsPlayer extends BaseCanvasBasedPlayer {
             const data = this.decodedFrames.shift();
             if (data) {
                 const frame: VideoFrame = data.frame;
-                const cw = this.tag.width;
-                const ch = this.tag.height;
-                // Edge H.265: displayWidth differs from codedWidth. Use full coded
-                // rect as source to draw the complete frame, not just the visible rect.
-                if (frame.displayWidth !== frame.codedWidth || frame.displayHeight !== frame.codedHeight) {
-                    this.context.drawImage(frame, 0, 0, frame.codedWidth, frame.codedHeight, 0, 0, cw, ch);
-                } else {
-                    this.context.drawImage(frame, 0, 0);
+                const cw = this.tag.width || frame.displayWidth;
+                const ch = this.tag.height || frame.displayHeight;
+                try {
+                    this.context.drawImage(frame, 0, 0, cw, ch);
+                } catch (e) {
+                    console.error('[WebCodecsPlayer] drawImage error:', e);
                 }
                 frame.close();
             }

@@ -83,7 +83,8 @@ export abstract class BaseCanvasBasedPlayer extends BasePlayer {
             return;
         }
         let dropped = 0;
-        const maxStored = this.videoSettings.maxFps / 10; // for 100ms
+        const fps = this.videoSettings?.maxFps && this.videoSettings.maxFps > 0 ? this.videoSettings.maxFps : 60;
+        const maxStored = Math.max(3, Math.round(fps / 10)); // buffer for at least 100ms or 3 frames
 
         while (this.decodedFrames.length > maxStored) {
             const data = this.decodedFrames.shift();
