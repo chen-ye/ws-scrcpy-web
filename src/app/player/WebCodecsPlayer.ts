@@ -93,8 +93,7 @@ export class WebCodecsPlayer extends BaseCanvasBasedPlayer {
                 this.onFrameDecoded(frame.displayWidth, frame.displayHeight, frame);
             },
             error: (error: DOMException) => {
-                console.error('[WebCodecsPlayer]', error, `code: ${error.code}`);
-                this.stop();
+                console.error('[WebCodecsPlayer] VideoDecoder error:', error, `code: ${error.code}`);
             },
         });
     }
@@ -109,19 +108,21 @@ export class WebCodecsPlayer extends BaseCanvasBasedPlayer {
         BasePlayer.prototype.pushFrame.call(this, data, isKeyframe);
 
         if (isConfig) {
+            console.log('[WebCodecsPlayer] Received config frame, size =', data.length);
             let result: { codec: string; width?: number; height?: number } | null = null;
             try {
                 result = this.parseConfig(data);
             } catch (e) {
                 console.error('[WebCodecsPlayer] parseConfig error:', e);
             }
+            if (!result) {
+                console.warn('[WebCodecsPlayer] parseConfig returned null, using fallback avc1.42E01E');
+                this.detectedCodec = 'h264';
+                result = { codec: 'avc1.42E01E' };
+            }
             if (result) {
-                // Coded dimensions from codec SPS (may include alignment padding, e.g. 1088 for 1080)
                 const codedW = result.width || this.metadataWidth;
                 const codedH = result.height || this.metadataHeight;
-                // Display dimensions from scrcpy metadata (actual device screen size).
-                // scrcpy-server rejects touch events whose screenSize doesn't match its video size,
-                // so we must use display dimensions for canvas/touch sizing, not coded dimensions.
                 const displayW = this.metadataWidth || result.width;
                 const displayH = this.metadataHeight || result.height;
                 if (displayW && displayH && displayW > 0 && displayH > 0) {
@@ -130,23 +131,30 @@ export class WebCodecsPlayer extends BaseCanvasBasedPlayer {
                 if (this.decoder.state === 'configured') {
                     this.decoder.flush().catch(() => {});
                 }
-                // Supply SPS/PPS (and VPS for H.265) once via `description` so the
-                // per-frame keyframe path no longer concatenates config + frame data.
-                this.decoder.configure(
-                    buildDecoderConfig({
-                        codec: result.codec,
-                        detectedCodec: this.detectedCodec,
-                        codedWidth: codedW,
-                        codedHeight: codedH,
-                        configData: data,
-                    }),
-                );
+                console.log('[WebCodecsPlayer] Configuring VideoDecoder:', result.codec, `${codedW}x${codedH}`);
+                try {
+                    this.decoder.configure(
+                        buildDecoderConfig({
+                            codec: result.codec,
+                            detectedCodec: this.detectedCodec,
+                            codedWidth: codedW,
+                            codedHeight: codedH,
+                            configData: data,
+                        }),
+                    );
+                    console.log('[WebCodecsPlayer] Decoder state after configure:', this.decoder.state);
+                } catch (err) {
+                    console.error('[WebCodecsPlayer] Decoder configure exception:', err);
+                }
             }
             this.configData = new Uint8Array(data);
             return;
         }
 
-        if (this.decoder.state !== 'configured') return;
+        if (this.decoder.state !== 'configured') {
+            console.warn('[WebCodecsPlayer] Dropping frame because decoder is:', this.decoder.state);
+            return;
+        }
 
         if (isKeyframe && this.configData) {
             if (!this.receivedFirstFrame) {
@@ -166,26 +174,34 @@ export class WebCodecsPlayer extends BaseCanvasBasedPlayer {
                 const fullData = new Uint8Array(this.configData.length + data.length);
                 fullData.set(this.configData);
                 fullData.set(data, this.configData.length);
-                this.decoder.decode(
-                    new EncodedVideoChunk({
-                        type: 'key',
-                        timestamp: Number(pts),
-                        data: fullData,
-                    }),
-                );
+                try {
+                    this.decoder.decode(
+                        new EncodedVideoChunk({
+                            type: 'key',
+                            timestamp: Number(pts),
+                            data: fullData,
+                        }),
+                    );
+                } catch (err) {
+                    console.error('[WebCodecsPlayer] Keyframe decode exception:', err);
+                }
             }
             return;
         }
 
         if (!this.receivedFirstFrame) return; // Skip delta frames before first keyframe
 
-        this.decoder.decode(
-            new EncodedVideoChunk({
-                type: isKeyframe ? 'key' : 'delta',
-                timestamp: Number(pts),
-                data,
-            }),
-        );
+        try {
+            this.decoder.decode(
+                new EncodedVideoChunk({
+                    type: isKeyframe ? 'key' : 'delta',
+                    timestamp: Number(pts),
+                    data,
+                }),
+            );
+        } catch (err) {
+            console.error('[WebCodecsPlayer] Delta frame decode exception:', err);
+        }
     }
 
     /** Find offset of NALU with given type in Annex B stream. Returns -1 if not found. */
@@ -194,40 +210,37 @@ export class WebCodecsPlayer extends BaseCanvasBasedPlayer {
     }
 
     private parseConfig(data: Uint8Array): { codec: string; width?: number; height?: number } | null {
-        // Try Annex B start code detection (H.264/H.265)
-        const naluOffset = this.findStartCode(data);
-        if (naluOffset >= 0) {
-            const firstByte = data[naluOffset]!;
-            const h265Type = hevcNalType(firstByte);
-
-            if (h265Type === HEVC_NAL_TYPE.VPS || h265Type === HEVC_NAL_TYPE.SPS) {
-                this.detectedCodec = 'h265';
-                const spsOffset = this.findHevcNalu(data, HEVC_NAL_TYPE.SPS);
-                if (spsOffset >= 0) {
-                    return parseHevcSPS(data.subarray(spsOffset));
-                }
-            } else {
-                const h264Type = firstByte & 0x1f;
-                if (h264Type === 7) {
-                    this.detectedCodec = 'h264';
-                    const spsOffset = this.findNaluOffset(data, 7);
-                    if (spsOffset >= 0) {
-                        return WebCodecsPlayer.parseSPSCodecString(data.subarray(spsOffset));
-                    }
-                }
+        // Try H.264 SPS anywhere in the config NAL stream
+        const spsOffset = this.findNaluOffset(data, 7);
+        if (spsOffset >= 0) {
+            this.detectedCodec = 'h264';
+            try {
+                return WebCodecsPlayer.parseSPSCodecString(data.subarray(spsOffset));
+            } catch (e) {
+                console.error('[WebCodecsPlayer] parseSPSCodecString error:', e);
+                return { codec: 'avc1.42E01E' };
             }
-            return null;
         }
 
-        // No Annex B start code — try AV1
+        // Try H.265 (VPS/SPS)
+        const hevcSpsOffset = this.findHevcNalu(data, HEVC_NAL_TYPE.SPS);
+        if (hevcSpsOffset >= 0) {
+            this.detectedCodec = 'h265';
+            try {
+                return parseHevcSPS(data.subarray(hevcSpsOffset));
+            } catch (e) {
+                console.error('[WebCodecsPlayer] parseHevcSPS error:', e);
+                return { codec: 'hev1.1.6.L93.B0' };
+            }
+        }
+
+        // Try AV1
         if (data.length >= 4) {
-            // Try AV1CodecConfigurationRecord first (4 bytes, marker=1)
             const configRecord = parseAv1ConfigRecord(data);
             if (configRecord) {
                 this.detectedCodec = 'av1';
                 return { ...configRecord, width: 0, height: 0 };
             }
-            // Try raw OBU Sequence Header
             if (obuType(data[0]!) === OBU_TYPE.SEQUENCE_HEADER) {
                 this.detectedCodec = 'av1';
                 return parseAv1SequenceHeader(data);
