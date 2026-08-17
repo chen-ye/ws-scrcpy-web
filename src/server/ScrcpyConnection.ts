@@ -184,7 +184,26 @@ export class ScrcpyConnection extends Mw {
 
         this.launchServer(options);
 
-        return this.acceptSockets(server, 3, 10000);
+        const audioEnabled = options.audio !== false;
+        const expectedCount = audioEnabled ? 3 : 2;
+        const sockets = await this.acceptSockets(server, expectedCount, 10000);
+
+        let videoSocket: net.Socket;
+        let audioSocket: net.Socket;
+        let controlSocket: net.Socket;
+
+        if (audioEnabled) {
+            videoSocket = sockets[0]!;
+            audioSocket = sockets[1]!;
+            controlSocket = sockets[2]!;
+        } else {
+            videoSocket = sockets[0]!;
+            audioSocket = new net.Socket();
+            audioSocket.unshift(Buffer.from([0x00, 0x00, 0x00, 0x00]));
+            controlSocket = sockets[1]!;
+        }
+
+        return [videoSocket, audioSocket, controlSocket];
     }
 
     private async startWithForwardTunnel(options: ScrcpyOptions): Promise<net.Socket[]> {
